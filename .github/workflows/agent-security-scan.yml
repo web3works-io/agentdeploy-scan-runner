@@ -54,8 +54,8 @@ jobs:
         id: source-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.AGENTDEPLOY_GITHUB_APP_ID }}
-          private-key: ${{ secrets.AGENTDEPLOY_GITHUB_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.GITHUB_APP_ID }}
+          private-key: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
           owner: ${{ steps.source-repo.outputs.owner }}
           repositories: ${{ steps.source-repo.outputs.name }}
 
@@ -88,12 +88,12 @@ jobs:
         id: seclab
         shell: bash
         env:
-          AI_API_TOKEN: ${{ secrets.AGENTDEPLOY_AI_API_TOKEN }}
+          AI_API_TOKEN: ${{ secrets.AI_API_TOKEN }}
           GH_TOKEN: ${{ steps.source-token.outputs.token }}
         run: |
           if [ -z "$AI_API_TOKEN" ]; then
             echo "status=missing_ai_api_token" >> "$GITHUB_OUTPUT"
-            echo "AGENTDEPLOY_AI_API_TOKEN is not configured; SecurityLab taskflow scan was not executed." > seclab-taskflow-output.txt
+            echo "AI_API_TOKEN is not configured; SecurityLab taskflow scan was not executed." > seclab-taskflow-output.txt
             exit 0
           fi
 
@@ -271,7 +271,7 @@ jobs:
             "summary": "Automated workflow scan completed using TruffleHog, Semgrep, and SecurityLab taskflow agent. Inspect workflow logs and artifacts for full output.",
             "recommendations": [
               "Review workflow logs and repository findings in detail.",
-              "Ensure AGENTDEPLOY_AI_API_TOKEN is configured so SecurityLab taskflow agent runs on every scan.",
+              "Ensure AI_API_TOKEN is configured so SecurityLab taskflow agent runs on every scan.",
               "Address any non-success tool outcomes before publishing."
             ]
           }
