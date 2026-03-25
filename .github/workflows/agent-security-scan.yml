@@ -80,6 +80,37 @@ jobs:
           config: p/security-audit
         continue-on-error: true
 
+      - name: Run SecurityLab Taskflow Agent
+        id: seclab
+        shell: bash
+        env:
+          AI_API_TOKEN: ${{ secrets.AGENTDEPLOY_AI_API_TOKEN }}
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+        run: |
+          if [ -z "$AI_API_TOKEN" ]; then
+            echo "status=missing_ai_api_token" >> "$GITHUB_OUTPUT"
+            echo "AGENTDEPLOY_AI_API_TOKEN is not configured; SecurityLab taskflow scan was not executed." > seclab-taskflow-output.txt
+            exit 0
+          fi
+
+          if ! docker pull ghcr.io/githubsecuritylab/seclab-taskflow-agent:latest > seclab-taskflow-output.txt 2>&1; then
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! docker run --rm \
+            -e AI_API_TOKEN="$AI_API_TOKEN" \
+            -e GH_TOKEN="$GH_TOKEN" \
+            ghcr.io/githubsecuritylab/seclab-taskflow-agent:latest \
+            -p seclab_taskflow_agent.personalities.assistant \
+            "Analyze repository ${{ steps.source-repo.outputs.full }} for agent-security risks. Focus on prompt injection paths, dependency/supply-chain exposure, and permission abuse risk. Return concise findings with severity labels." \
+            >> seclab-taskflow-output.txt 2>&1; then
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "status=executed" >> "$GITHUB_OUTPUT"
+
       - name: Compile markdown report
         run: |
           echo "# ${{ github.event.inputs.report_title }}" > report.md
@@ -94,16 +125,28 @@ jobs:
           echo "## Security Tool Results" >> report.md
           echo "- TruffleHog: ${{ steps.trufflehog.outcome }}" >> report.md
           echo "- Semgrep: ${{ steps.semgrep.outcome }}" >> report.md
+          echo "- SecurityLab Taskflow Agent: ${{ steps.seclab.outputs.status }}" >> report.md
           echo "" >> report.md
-          echo "Review workflow logs for full findings." >> report.md
+          echo "Review workflow logs and artifact outputs for full findings." >> report.md
+          if [ -f seclab-taskflow-output.txt ]; then
+            echo "" >> report.md
+            echo "### SecurityLab Taskflow Agent Output (excerpt)" >> report.md
+            echo '\`\`\`text' >> report.md
+            head -n 80 seclab-taskflow-output.txt >> report.md
+            echo '\`\`\`' >> report.md
+          fi
 
       - name: Build machine-readable scan result
         run: |
           TRUFFLEHOG_STATUS="${{ steps.trufflehog.outcome }}"
           SEMGREP_STATUS="${{ steps.semgrep.outcome }}"
+          SECLAB_STATUS="${{ steps.seclab.outputs.status }}"
 
           SECRETS_RATING="A"
           SAST_RATING="A"
+          PROMPT_INJECTION_RATING="A"
+          DEPENDENCIES_RATING="A"
+          PERMISSIONS_RATING="A"
           OVERALL_RATING="A"
           OVERALL_SCORE=95
           RISK_LEVEL="low"
@@ -125,6 +168,34 @@ jobs:
             HIGH_COUNT=1
           fi
 
+          if [ "$SECLAB_STATUS" = "missing_ai_api_token" ] || [ "$SECLAB_STATUS" = "failed" ]; then
+            PROMPT_INJECTION_RATING="C"
+            DEPENDENCIES_RATING="C"
+            PERMISSIONS_RATING="C"
+            OVERALL_RATING="C"
+            OVERALL_SCORE=68
+            RISK_LEVEL="medium"
+            HIGH_COUNT=1
+          elif [ "$SECLAB_STATUS" = "executed" ] && [ -f seclab-taskflow-output.txt ]; then
+            if grep -Eiq '(critical|remote code execution|token exfiltration|privilege escalation)' seclab-taskflow-output.txt; then
+              PROMPT_INJECTION_RATING="D"
+              DEPENDENCIES_RATING="D"
+              PERMISSIONS_RATING="D"
+              OVERALL_RATING="D"
+              OVERALL_SCORE=45
+              RISK_LEVEL="high"
+              HIGH_COUNT=2
+            elif grep -Eiq '(high|command injection|sql injection|supply chain|dependency confusion)' seclab-taskflow-output.txt; then
+              PROMPT_INJECTION_RATING="C"
+              DEPENDENCIES_RATING="C"
+              PERMISSIONS_RATING="C"
+              OVERALL_RATING="C"
+              OVERALL_SCORE=62
+              RISK_LEVEL="medium"
+              HIGH_COUNT=1
+            fi
+          fi
+
           cat > scan-result.json <<EOF
           {
             "overallRating": "$OVERALL_RATING",
@@ -138,14 +209,15 @@ jobs:
             },
             "categoryRatings": {
               "secrets": "$SECRETS_RATING",
-              "promptInjection": "A",
-              "dependencies": "A",
-              "permissions": "A",
+              "promptInjection": "$PROMPT_INJECTION_RATING",
+              "dependencies": "$DEPENDENCIES_RATING",
+              "permissions": "$PERMISSIONS_RATING",
               "sast": "$SAST_RATING"
             },
-            "summary": "Automated workflow scan completed. Inspect workflow logs for full tool output.",
+            "summary": "Automated workflow scan completed using TruffleHog, Semgrep, and SecurityLab taskflow agent. Inspect workflow logs and artifacts for full output.",
             "recommendations": [
               "Review workflow logs and repository findings in detail.",
+              "Ensure AGENTDEPLOY_AI_API_TOKEN is configured so SecurityLab taskflow agent runs on every scan.",
               "Address any non-success tool outcomes before publishing."
             ]
           }
@@ -165,4 +237,5 @@ jobs:
           path: |
             pdf_output/report.pdf
             scan-result.json
+            seclab-taskflow-output.txt
           retention-days: 7
