@@ -68,9 +68,9 @@ jobs:
 
       - name: Run TruffleHog
         id: trufflehog
-        uses: trufflesecurity/trufflehog-actions-scan@v3
+        uses: trufflesecurity/trufflehog@main
         with:
-          args: --only-verified --fail
+          extra_args: --results=verified,unknown
         continue-on-error: true
 
       - name: Run Semgrep
