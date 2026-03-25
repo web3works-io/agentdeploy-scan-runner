@@ -292,12 +292,17 @@ jobs:
           }
           EOF
 
+      - name: Install PDF tooling
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc wkhtmltopdf
+
       - name: Convert markdown to PDF
-        uses: baileyjm02/markdown-to-pdf@v1
-        with:
-          input_path: report.md
-          output_dir: pdf_output
-          theme: github
+        shell: bash
+        run: |
+          mkdir -p pdf_output
+          pandoc report.md -o pdf_output/report.pdf --pdf-engine=wkhtmltopdf
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
