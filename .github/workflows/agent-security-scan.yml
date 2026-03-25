@@ -70,14 +70,18 @@ jobs:
         id: trufflehog
         uses: trufflesecurity/trufflehog-actions-scan@v3
         with:
-          args: --only-verified
+          args: --only-verified --fail
         continue-on-error: true
 
       - name: Run Semgrep
         id: semgrep
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: p/security-audit
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            semgrep/semgrep:latest \
+            semgrep --config p/security-audit --error
         continue-on-error: true
 
       - name: Run SecurityLab Taskflow Agent
@@ -113,6 +117,34 @@ jobs:
 
       - name: Compile markdown report
         run: |
+          TRUFFLEHOG_OUTCOME="${{ steps.trufflehog.outcome }}"
+          SEMGREP_OUTCOME="${{ steps.semgrep.outcome }}"
+          SECLAB_STATUS="${{ steps.seclab.outputs.status }}"
+
+          TRUFFLEHOG_DISPLAY="⚠️ Scan Failed"
+          SEMGREP_DISPLAY="⚠️ Scan Failed"
+          SECLAB_DISPLAY="⚠️ Scan Failed"
+
+          if [ "$TRUFFLEHOG_OUTCOME" = "success" ]; then
+            TRUFFLEHOG_DISPLAY="✅ No Findings"
+          elif [ "$TRUFFLEHOG_OUTCOME" = "failure" ]; then
+            TRUFFLEHOG_DISPLAY="🔴 Findings Detected"
+          fi
+
+          if [ "$SEMGREP_OUTCOME" = "success" ]; then
+            SEMGREP_DISPLAY="✅ No Findings"
+          elif [ "$SEMGREP_OUTCOME" = "failure" ]; then
+            SEMGREP_DISPLAY="🔴 Findings Detected"
+          fi
+
+          if [ "$SECLAB_STATUS" = "executed" ]; then
+            SECLAB_DISPLAY="✅ Completed"
+          elif [ "$SECLAB_STATUS" = "missing_ai_api_token" ]; then
+            SECLAB_DISPLAY="🟡 Not Configured"
+          elif [ "$SECLAB_STATUS" = "failed" ]; then
+            SECLAB_DISPLAY="⚠️ Execution Failed"
+          fi
+
           echo "# ${{ github.event.inputs.report_title }}" > report.md
           echo "" >> report.md
           echo "- Scan Job ID: ${{ github.event.inputs.scan_job_id }}" >> report.md
@@ -123,9 +155,9 @@ jobs:
           echo "- Completed At: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> report.md
           echo "" >> report.md
           echo "## Security Tool Results" >> report.md
-          echo "- TruffleHog: ${{ steps.trufflehog.outcome }}" >> report.md
-          echo "- Semgrep: ${{ steps.semgrep.outcome }}" >> report.md
-          echo "- SecurityLab Taskflow Agent: ${{ steps.seclab.outputs.status }}" >> report.md
+          echo "- TruffleHog: $TRUFFLEHOG_DISPLAY" >> report.md
+          echo "- Semgrep: $SEMGREP_DISPLAY" >> report.md
+          echo "- SecurityLab Taskflow Agent: $SECLAB_DISPLAY" >> report.md
           echo "" >> report.md
           echo "Review workflow logs and artifact outputs for full findings." >> report.md
           if [ -f seclab-taskflow-output.txt ]; then
@@ -149,50 +181,72 @@ jobs:
           PERMISSIONS_RATING="A"
           OVERALL_RATING="A"
           OVERALL_SCORE=95
-          RISK_LEVEL="low"
+          RISK_LEVEL="none"
+
+          TOOL_FINDINGS=0
           HIGH_COUNT=0
+          MEDIUM_COUNT=0
+          CRITICAL_COUNT=0
 
           if [ "$TRUFFLEHOG_STATUS" != "success" ]; then
             SECRETS_RATING="C"
-            OVERALL_RATING="C"
-            OVERALL_SCORE=72
-            RISK_LEVEL="medium"
+            TOOL_FINDINGS=$((TOOL_FINDINGS + 1))
             HIGH_COUNT=1
           fi
 
           if [ "$SEMGREP_STATUS" != "success" ]; then
             SAST_RATING="C"
-            OVERALL_RATING="C"
-            OVERALL_SCORE=70
-            RISK_LEVEL="medium"
-            HIGH_COUNT=1
+            TOOL_FINDINGS=$((TOOL_FINDINGS + 1))
+            HIGH_COUNT=$((HIGH_COUNT + 1))
           fi
 
           if [ "$SECLAB_STATUS" = "missing_ai_api_token" ] || [ "$SECLAB_STATUS" = "failed" ]; then
-            PROMPT_INJECTION_RATING="C"
-            DEPENDENCIES_RATING="C"
-            PERMISSIONS_RATING="C"
-            OVERALL_RATING="C"
-            OVERALL_SCORE=68
-            RISK_LEVEL="medium"
-            HIGH_COUNT=1
+            PROMPT_INJECTION_RATING="B"
+            DEPENDENCIES_RATING="B"
+            PERMISSIONS_RATING="B"
+            TOOL_FINDINGS=$((TOOL_FINDINGS + 1))
+            MEDIUM_COUNT=$((MEDIUM_COUNT + 1))
           elif [ "$SECLAB_STATUS" = "executed" ] && [ -f seclab-taskflow-output.txt ]; then
             if grep -Eiq '(critical|remote code execution|token exfiltration|privilege escalation)' seclab-taskflow-output.txt; then
-              PROMPT_INJECTION_RATING="D"
-              DEPENDENCIES_RATING="D"
-              PERMISSIONS_RATING="D"
-              OVERALL_RATING="D"
-              OVERALL_SCORE=45
-              RISK_LEVEL="high"
-              HIGH_COUNT=2
+              PROMPT_INJECTION_RATING="C"
+              DEPENDENCIES_RATING="C"
+              PERMISSIONS_RATING="C"
+              TOOL_FINDINGS=$((TOOL_FINDINGS + 1))
+              CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
             elif grep -Eiq '(high|command injection|sql injection|supply chain|dependency confusion)' seclab-taskflow-output.txt; then
               PROMPT_INJECTION_RATING="C"
               DEPENDENCIES_RATING="C"
               PERMISSIONS_RATING="C"
-              OVERALL_RATING="C"
-              OVERALL_SCORE=62
+              TOOL_FINDINGS=$((TOOL_FINDINGS + 1))
+              HIGH_COUNT=$((HIGH_COUNT + 1))
+            elif grep -Eiq '(medium|moderate|unsafe default|weak validation)' seclab-taskflow-output.txt; then
+              PROMPT_INJECTION_RATING="B"
+              DEPENDENCIES_RATING="B"
+              PERMISSIONS_RATING="B"
+              TOOL_FINDINGS=$((TOOL_FINDINGS + 1))
+              MEDIUM_COUNT=$((MEDIUM_COUNT + 1))
+            fi
+          fi
+
+          if [ "$TOOL_FINDINGS" -eq 0 ]; then
+            OVERALL_RATING="A"
+            OVERALL_SCORE=95
+            RISK_LEVEL="none"
+          elif [ "$TOOL_FINDINGS" -eq 1 ]; then
+            OVERALL_RATING="B"
+            OVERALL_SCORE=82
+            RISK_LEVEL="low"
+            if [ "$HIGH_COUNT" -gt 0 ] || [ "$CRITICAL_COUNT" -gt 0 ]; then
+              OVERALL_SCORE=78
               RISK_LEVEL="medium"
-              HIGH_COUNT=1
+            fi
+          else
+            OVERALL_RATING="C"
+            OVERALL_SCORE=66
+            RISK_LEVEL="medium"
+            if [ "$CRITICAL_COUNT" -gt 0 ] || [ "$HIGH_COUNT" -gt 1 ]; then
+              OVERALL_SCORE=58
+              RISK_LEVEL="high"
             fi
           fi
 
@@ -203,9 +257,9 @@ jobs:
             "riskLevel": "$RISK_LEVEL",
             "severityCounts": {
               "low": 0,
-              "medium": 0,
+              "medium": $MEDIUM_COUNT,
               "high": $HIGH_COUNT,
-              "critical": 0
+              "critical": $CRITICAL_COUNT
             },
             "categoryRatings": {
               "secrets": "$SECRETS_RATING",
