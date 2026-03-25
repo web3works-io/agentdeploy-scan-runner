@@ -28,6 +28,10 @@ jobs:
     permissions:
       contents: read
       security-events: read
+    env:
+      AGENTDEPLOY_APP_ID: ${{ vars.GITHUB_APP_ID || vars.AGENTDEPLOY_GITHUB_APP_ID || secrets.GITHUB_APP_ID || secrets.AGENTDEPLOY_GITHUB_APP_ID }}
+      AGENTDEPLOY_APP_PRIVATE_KEY: ${{ secrets.GITHUB_APP_PRIVATE_KEY || secrets.AGENTDEPLOY_GITHUB_APP_PRIVATE_KEY }}
+      AGENTDEPLOY_AI_API_TOKEN: ${{ secrets.AI_API_TOKEN || secrets.AGENTDEPLOY_AI_API_TOKEN }}
 
     steps:
       - name: Resolve source repository
@@ -52,12 +56,23 @@ jobs:
 
       - name: Create GitHub App token for source repository
         id: source-token
+        if: ${{ env.AGENTDEPLOY_APP_ID != '' && env.AGENTDEPLOY_APP_PRIVATE_KEY != '' }}
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.GITHUB_APP_ID }}
-          private-key: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+          app-id: ${{ env.AGENTDEPLOY_APP_ID }}
+          private-key: ${{ env.AGENTDEPLOY_APP_PRIVATE_KEY }}
           owner: ${{ steps.source-repo.outputs.owner }}
           repositories: ${{ steps.source-repo.outputs.name }}
+
+      - name: Validate GitHub App credentials
+        if: ${{ env.AGENTDEPLOY_APP_ID == '' || env.AGENTDEPLOY_APP_PRIVATE_KEY == '' }}
+        shell: bash
+        run: |
+          echo "Missing GitHub App credentials in workflow repository." >&2
+          echo "Required (any supported naming):" >&2
+          echo "- app id: vars.GITHUB_APP_ID or vars.AGENTDEPLOY_GITHUB_APP_ID (or secret equivalent)" >&2
+          echo "- private key: secrets.GITHUB_APP_PRIVATE_KEY or secrets.AGENTDEPLOY_GITHUB_APP_PRIVATE_KEY" >&2
+          exit 1
 
       - name: Checkout source repository
         uses: actions/checkout@v4
@@ -88,7 +103,7 @@ jobs:
         id: seclab
         shell: bash
         env:
-          AI_API_TOKEN: ${{ secrets.AI_API_TOKEN }}
+          AI_API_TOKEN: ${{ env.AGENTDEPLOY_AI_API_TOKEN }}
           GH_TOKEN: ${{ steps.source-token.outputs.token }}
         run: |
           if [ -z "$AI_API_TOKEN" ]; then
