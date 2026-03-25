@@ -32,6 +32,7 @@ jobs:
       AGENTDEPLOY_APP_ID: ${{ vars.GITHUB_APP_ID || vars.AGENTDEPLOY_GITHUB_APP_ID || secrets.GITHUB_APP_ID || secrets.AGENTDEPLOY_GITHUB_APP_ID }}
       AGENTDEPLOY_APP_PRIVATE_KEY: ${{ secrets.GITHUB_APP_PRIVATE_KEY || secrets.AGENTDEPLOY_GITHUB_APP_PRIVATE_KEY }}
       AGENTDEPLOY_AI_API_TOKEN: ${{ secrets.AI_API_TOKEN || secrets.AGENTDEPLOY_AI_API_TOKEN }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
       - name: Resolve source repository
@@ -83,21 +84,44 @@ jobs:
 
       - name: Run TruffleHog
         id: trufflehog
-        uses: trufflesecurity/trufflehog@main
-        with:
-          extra_args: --results=verified,unknown
-        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          docker run --rm \
+            -v "$PWD:/repo" \
+            trufflesecurity/trufflehog:latest \
+            filesystem /repo --results=verified,unknown --json > trufflehog-output.json
+          CODE=$?
+          set -e
+
+          if [ $CODE -eq 0 ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+          fi
+          echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Run Semgrep
         id: semgrep
         shell: bash
         run: |
+          set +e
           docker run --rm \
             -v "$PWD:/src" \
             -w /src \
             semgrep/semgrep:latest \
-            semgrep --config p/security-audit --error
-        continue-on-error: true
+            semgrep --config p/security-audit --error --json > semgrep-output.json
+          CODE=$?
+          set -e
+
+          if [ $CODE -eq 0 ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+          fi
+          echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Run SecurityLab Taskflow Agent
         id: seclab
@@ -131,9 +155,10 @@ jobs:
           echo "status=executed" >> "$GITHUB_OUTPUT"
 
       - name: Compile markdown report
+        if: ${{ always() }}
         run: |
-          TRUFFLEHOG_OUTCOME="${{ steps.trufflehog.outcome }}"
-          SEMGREP_OUTCOME="${{ steps.semgrep.outcome }}"
+          TRUFFLEHOG_OUTCOME="${{ steps.trufflehog.outputs.status || 'failure' }}"
+          SEMGREP_OUTCOME="${{ steps.semgrep.outputs.status || 'failure' }}"
           SECLAB_STATUS="${{ steps.seclab.outputs.status }}"
 
           TRUFFLEHOG_DISPLAY="⚠️ Scan Failed"
@@ -184,9 +209,10 @@ jobs:
           fi
 
       - name: Build machine-readable scan result
+        if: ${{ always() }}
         run: |
-          TRUFFLEHOG_STATUS="${{ steps.trufflehog.outcome }}"
-          SEMGREP_STATUS="${{ steps.semgrep.outcome }}"
+          TRUFFLEHOG_STATUS="${{ steps.trufflehog.outputs.status || 'failure' }}"
+          SEMGREP_STATUS="${{ steps.semgrep.outputs.status || 'failure' }}"
           SECLAB_STATUS="${{ steps.seclab.outputs.status }}"
 
           SECRETS_RATING="A"
@@ -293,18 +319,24 @@ jobs:
           EOF
 
       - name: Install PDF tooling
+        if: ${{ always() }}
         shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y pandoc wkhtmltopdf
 
       - name: Convert markdown to PDF
+        if: ${{ always() }}
         shell: bash
         run: |
           mkdir -p pdf_output
-          pandoc report.md -o pdf_output/report.pdf --pdf-engine=wkhtmltopdf
+          if ! pandoc report.md -o pdf_output/report.pdf --pdf-engine=wkhtmltopdf; then
+            printf '%s\n' '<html><body><h1>Scan Report</h1><p>Primary markdown to PDF conversion failed. See artifacts for details.</p></body></html>' > pdf_output/fallback.html
+            wkhtmltopdf pdf_output/fallback.html pdf_output/report.pdf
+          fi
 
       - name: Upload report artifact
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: Certified-Security-Report
@@ -312,4 +344,7 @@ jobs:
             pdf_output/report.pdf
             scan-result.json
             seclab-taskflow-output.txt
+            trufflehog-output.json
+            semgrep-output.json
           retention-days: 7
+          if-no-files-found: warn
